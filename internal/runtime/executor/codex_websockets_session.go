@@ -2,7 +2,9 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -12,6 +14,7 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 )
 
 type codexWebsocketSessionStore struct {
@@ -82,6 +85,110 @@ type codexWebsocketRead struct {
 	msgType int
 	payload []byte
 	err     error
+}
+
+type codexWebsocketReadStats struct {
+	lastFrameAt time.Time
+	lastEvent   string
+	frameCount  uint64
+	byteCount   uint64
+}
+
+func (s *codexWebsocketReadStats) observeTextFrame(now time.Time, payload []byte) (log.Fields, bool) {
+	if s == nil {
+		return nil, false
+	}
+	eventType := safeCodexWebsocketEventType(gjson.GetBytes(payload, "type").String())
+	previousGap := time.Duration(0)
+	if !s.lastFrameAt.IsZero() {
+		previousGap = now.Sub(s.lastFrameAt)
+	}
+	s.frameCount++
+	s.byteCount += uint64(len(payload))
+	s.lastFrameAt = now
+	if eventType == s.lastEvent {
+		return nil, false
+	}
+	s.lastEvent = eventType
+	return log.Fields{
+		"event":           eventType,
+		"sequence":        gjson.GetBytes(payload, "sequence_number").Int(),
+		"frame_bytes":     len(payload),
+		"previous_gap":    previousGap,
+		"frame_count":     s.frameCount,
+		"cumulative_size": s.byteCount,
+	}, true
+}
+
+func safeCodexWebsocketEventType(eventType string) string {
+	eventType = strings.TrimSpace(eventType)
+	if eventType == "" {
+		return "<unknown>"
+	}
+	if len(eventType) > 128 {
+		return "<invalid>"
+	}
+	for _, r := range eventType {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
+			r == '.' || r == '_' || r == '-' {
+			continue
+		}
+		return "<invalid>"
+	}
+	return eventType
+}
+
+func (s *codexWebsocketReadStats) readStopFields(now time.Time, active bool, err error) log.Fields {
+	fields := log.Fields{
+		"active_response": active,
+		"last_event":      "<none>",
+		"last_frame_ago":  time.Duration(0),
+		"frame_count":     uint64(0),
+		"byte_count":      uint64(0),
+		"error_kind":      codexWebsocketReadErrorKind(err),
+	}
+	if s != nil {
+		if s.lastEvent != "" {
+			fields["last_event"] = s.lastEvent
+		}
+		if !s.lastFrameAt.IsZero() {
+			fields["last_frame_ago"] = now.Sub(s.lastFrameAt)
+		}
+		fields["frame_count"] = s.frameCount
+		fields["byte_count"] = s.byteCount
+	}
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) {
+		fields["close_code"] = closeErr.Code
+	}
+	return fields
+}
+
+func codexWebsocketReadErrorKind(err error) string {
+	if err == nil {
+		return "none"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "context_canceled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "context_deadline"
+	}
+	if errors.Is(err, net.ErrClosed) {
+		return "local_close"
+	}
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) {
+		if closeErr.Code == websocket.CloseAbnormalClosure {
+			return "abnormal_close"
+		}
+		return "websocket_close"
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "timeout"
+	}
+	return "read_error"
 }
 
 func (s *codexWebsocketSession) setActive(conn *websocket.Conn, ch chan codexWebsocketRead) {
@@ -520,15 +627,23 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 	if e == nil || sess == nil || conn == nil {
 		return
 	}
+	var stats codexWebsocketReadStats
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(codexResponsesWebsocketIdleTimeout))
 		msgType, payload, errRead := conn.ReadMessage()
 		if errRead != nil {
+			ch, done := sess.activeForConn(conn)
+			fields := stats.readStopFields(time.Now(), ch != nil, errRead)
+			fields["session"] = sess.sessionID
+			if ch != nil && codexWebsocketReadErrorKind(errRead) != "local_close" {
+				log.WithFields(fields).Warn("codex websocket upstream read stopped")
+			} else {
+				log.WithFields(fields).Info("codex websocket upstream read stopped")
+			}
 			invalidate := func() {
 				e.invalidateUpstreamConn(sess, conn, "upstream_disconnected", errRead)
 			}
 			invalidated := false
-			ch, done := sess.activeForConn(conn)
 			if ch != nil {
 				invalidated = sendTerminalWebsocketRead(ch, done, codexWebsocketRead{conn: conn, err: errRead}, invalidate)
 				if sess.clearActive(conn, ch) {
@@ -564,6 +679,11 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 		}
 
 		ch, done := sess.activeForConn(conn)
+		if fields, changed := stats.observeTextFrame(time.Now(), payload); changed {
+			fields["session"] = sess.sessionID
+			fields["active_response"] = ch != nil
+			log.WithFields(fields).Info("codex websocket upstream event")
+		}
 		if ch == nil {
 			continue
 		}

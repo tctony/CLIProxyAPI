@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -23,6 +25,111 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 )
+
+func TestCodexWebsocketReadStatsTracksSafeEventMetadata(t *testing.T) {
+	var stats codexWebsocketReadStats
+	startedAt := time.Date(2026, time.July, 29, 12, 0, 0, 0, time.UTC)
+	firstPayload := []byte(`{"type":"response.output_text.delta","sequence_number":7,"delta":"secret output"}`)
+
+	first, changed := stats.observeTextFrame(startedAt, firstPayload)
+	if !changed {
+		t.Fatal("first event was not reported as a transition")
+	}
+	if got := first["event"]; got != "response.output_text.delta" {
+		t.Fatalf("event = %v, want response.output_text.delta", got)
+	}
+	if got := first["sequence"]; got != int64(7) {
+		t.Fatalf("sequence = %v, want 7", got)
+	}
+	if got := first["previous_gap"]; got != time.Duration(0) {
+		t.Fatalf("previous_gap = %v, want 0", got)
+	}
+
+	secondAt := startedAt.Add(250 * time.Millisecond)
+	secondPayload := []byte(`{"type":"response.output_text.delta","sequence_number":8,"delta":"more secret output"}`)
+	if _, changed = stats.observeTextFrame(secondAt, secondPayload); changed {
+		t.Fatal("repeated event type was reported as a transition")
+	}
+
+	completedAt := secondAt.Add(750 * time.Millisecond)
+	completedPayload := []byte(`{"type":"response.completed","sequence_number":9,"response":{"output":[]}}`)
+	completed, changed := stats.observeTextFrame(completedAt, completedPayload)
+	if !changed {
+		t.Fatal("completed event was not reported as a transition")
+	}
+	if got := completed["previous_gap"]; got != 750*time.Millisecond {
+		t.Fatalf("previous_gap = %v, want 750ms", got)
+	}
+	if got := completed["frame_count"]; got != uint64(3) {
+		t.Fatalf("frame_count = %v, want 3", got)
+	}
+	wantBytes := uint64(len(firstPayload) + len(secondPayload) + len(completedPayload))
+	if got := completed["cumulative_size"]; got != wantBytes {
+		t.Fatalf("cumulative_size = %v, want %d", got, wantBytes)
+	}
+
+	for key, value := range completed {
+		if strings.Contains(key, "payload") || strings.Contains(key, "delta") ||
+			strings.Contains(fmt.Sprint(value), "secret output") {
+			t.Fatalf("unsafe event metadata field %q=%v", key, value)
+		}
+	}
+
+	var unsafeStats codexWebsocketReadStats
+	unsafeFields, _ := unsafeStats.observeTextFrame(startedAt, []byte(`{"type":"secret output","delta":"secret output"}`))
+	if got := unsafeFields["event"]; got != "<invalid>" {
+		t.Fatalf("unsafe event type = %v, want <invalid>", got)
+	}
+}
+
+func TestCodexWebsocketReadStatsSummarizesReadStop(t *testing.T) {
+	lastFrameAt := time.Date(2026, time.July, 29, 12, 0, 0, 0, time.UTC)
+	var stats codexWebsocketReadStats
+	stats.observeTextFrame(lastFrameAt, []byte(`{"type":"response.created"}`))
+
+	tests := []struct {
+		name     string
+		err      error
+		active   bool
+		wantKind string
+		wantCode int
+	}{
+		{
+			name:     "active abnormal EOF",
+			err:      &websocket.CloseError{Code: websocket.CloseAbnormalClosure, Text: "unexpected EOF"},
+			active:   true,
+			wantKind: "abnormal_close",
+			wantCode: websocket.CloseAbnormalClosure,
+		},
+		{name: "idle EOF", err: errors.New("EOF"), wantKind: "read_error"},
+		{name: "context cancellation", err: context.Canceled, active: true, wantKind: "context_canceled"},
+		{name: "local close", err: net.ErrClosed, wantKind: "local_close"},
+		{name: "local read timeout", err: &net.DNSError{IsTimeout: true}, active: true, wantKind: "timeout"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fields := stats.readStopFields(lastFrameAt.Add(2*time.Minute), tt.active, tt.err)
+			if got := fields["error_kind"]; got != tt.wantKind {
+				t.Fatalf("error_kind = %v, want %s", got, tt.wantKind)
+			}
+			if got := fields["active_response"]; got != tt.active {
+				t.Fatalf("active_response = %v, want %v", got, tt.active)
+			}
+			if got := fields["last_event"]; got != "response.created" {
+				t.Fatalf("last_event = %v, want response.created", got)
+			}
+			if got := fields["last_frame_ago"]; got != 2*time.Minute {
+				t.Fatalf("last_frame_ago = %v, want 2m", got)
+			}
+			if got := fields["close_code"]; tt.wantCode == 0 && got != nil {
+				t.Fatalf("close_code = %v, want absent", got)
+			} else if tt.wantCode != 0 && got != tt.wantCode {
+				t.Fatalf("close_code = %v, want %d", got, tt.wantCode)
+			}
+		})
+	}
+}
 
 func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T) {
 	body := []byte(`{"model":"gpt-5-codex","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-1"}]}`)

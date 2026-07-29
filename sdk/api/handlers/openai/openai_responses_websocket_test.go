@@ -340,6 +340,69 @@ func TestResponsesWebsocketWriterCloseDoesNotWaitForActiveDataWriter(t *testing.
 	}
 }
 
+func TestResponsesWebsocketUpstreamDisconnectOrdersErrorBeforeClose(t *testing.T) {
+	serverErrCh := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		writer := newResponsesWebsocketWriter(conn)
+		disconnect := newResponsesWebsocketDisconnectCoordinator(writer)
+		disconnect.beginForward()
+		disconnect.handle(errors.New("unexpected EOF"))
+
+		_, err = writeResponsesWebsocketError(writer, nil, &interfaces.ErrorMessage{
+			StatusCode: http.StatusInternalServerError,
+			Error:      errors.New("unexpected EOF"),
+		})
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		closed, errClose := disconnect.endForward()
+		if !closed && errClose == nil {
+			errClose = errors.New("pending upstream disconnect did not close downstream websocket")
+		}
+		serverErrCh <- errClose
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if err = conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+
+	msgType, payload, errRead := conn.ReadMessage()
+	if errRead != nil {
+		t.Fatalf("read structured error before close: %v", errRead)
+	}
+	if msgType != websocket.TextMessage || gjson.GetBytes(payload, "type").String() != wsEventTypeError {
+		t.Fatalf("first downstream message = type %d payload %s, want JSON error event", msgType, payload)
+	}
+
+	_, _, errRead = conn.ReadMessage()
+	var closeErr *websocket.CloseError
+	if !errors.As(errRead, &closeErr) {
+		t.Fatalf("second downstream read = %v, want close frame", errRead)
+	}
+	if closeErr.Code != websocket.CloseInternalServerErr {
+		t.Fatalf("close code = %d, want %d", closeErr.Code, websocket.CloseInternalServerErr)
+	}
+	if closeErr.Text != wsUpstreamDisconnectCloseReason {
+		t.Fatalf("close reason = %q, want %q", closeErr.Text, wsUpstreamDisconnectCloseReason)
+	}
+	if errServer := <-serverErrCh; errServer != nil {
+		t.Fatalf("server error: %v", errServer)
+	}
+}
+
 func TestTruncateWebsocketCloseReason(t *testing.T) {
 	tests := []struct {
 		name     string

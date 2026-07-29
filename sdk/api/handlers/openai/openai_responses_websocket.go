@@ -34,6 +34,7 @@ const (
 	wsTimelineBodyKey                     = "WEBSOCKET_TIMELINE_OVERRIDE"
 	wsCloseReasonMaxBytes                 = 123
 	wsHTTPReplayRequiredCloseReason       = "upstream requires HTTP replay"
+	wsUpstreamDisconnectCloseReason       = "upstream websocket disconnected"
 	responsesWebsocketUpstreamModeUnknown = ""
 	responsesWebsocketUpstreamModeWS      = "websocket"
 	responsesWebsocketUpstreamModeHTTP    = "http"
@@ -108,8 +109,63 @@ type responsesWebsocketWriter struct {
 	closing atomic.Bool
 }
 
+type responsesWebsocketDisconnectCoordinator struct {
+	mu         sync.Mutex
+	writer     *responsesWebsocketWriter
+	forwarding bool
+	pending    bool
+	pendingErr error
+}
+
 func newResponsesWebsocketWriter(conn *websocket.Conn) *responsesWebsocketWriter {
 	return &responsesWebsocketWriter{conn: conn}
+}
+
+func newResponsesWebsocketDisconnectCoordinator(writer *responsesWebsocketWriter) *responsesWebsocketDisconnectCoordinator {
+	return &responsesWebsocketDisconnectCoordinator{writer: writer}
+}
+
+func (c *responsesWebsocketDisconnectCoordinator) beginForward() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.forwarding = true
+	c.mu.Unlock()
+}
+
+func (c *responsesWebsocketDisconnectCoordinator) endForward() (bool, error) {
+	if c == nil {
+		return false, nil
+	}
+	c.mu.Lock()
+	c.forwarding = false
+	pending := c.pending
+	err := c.pendingErr
+	c.pending = false
+	c.pendingErr = nil
+	c.mu.Unlock()
+	if !pending {
+		return false, nil
+	}
+	return true, c.writer.closeForUpstreamDisconnect(err)
+}
+
+func (c *responsesWebsocketDisconnectCoordinator) handle(err error) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	if c.forwarding {
+		c.pending = true
+		c.pendingErr = err
+		c.mu.Unlock()
+		return
+	}
+	c.mu.Unlock()
+	if errClose := c.writer.closeForUpstreamDisconnect(err); errClose != nil && !errors.Is(errClose, websocket.ErrCloseSent) {
+		log.Debugf("responses websocket: upstream disconnect close failed: %v", errClose)
+	}
 }
 
 // closeForUpstreamError sends a best-effort close frame without waiting behind
@@ -123,30 +179,41 @@ func (w *responsesWebsocketWriter) closeForUpstreamError(err error) (bool, error
 	if !matched {
 		return false, nil
 	}
+	return true, w.closeWithPayload(payload)
+}
+
+func (w *responsesWebsocketWriter) closeWithPayload(payload []byte) error {
+	if w == nil || w.conn == nil {
+		return nil
+	}
 	if !w.closing.CompareAndSwap(false, true) {
-		return true, nil
+		return nil
 	}
 	if !w.writeMu.TryLock() {
-		return true, w.conn.Close()
+		return w.conn.Close()
 	}
 	defer w.writeMu.Unlock()
 
 	errWrite := w.conn.WriteControl(websocket.CloseMessage, payload, time.Time{})
 	errClose := w.conn.Close()
 	if errWrite != nil {
-		return true, errWrite
+		return errWrite
 	}
-	return true, errClose
+	return errClose
 }
 
-func (w *responsesWebsocketWriter) closeForUpstreamDisconnect(err error) {
+func (w *responsesWebsocketWriter) closeForUpstreamDisconnect(err error) error {
 	if w == nil || w.conn == nil {
-		return
+		return nil
 	}
-	if matched, _ := w.closeForUpstreamError(err); matched {
-		return
+	if matched, payload := websocketClosePayloadForUpstreamError(err); matched {
+		return w.closeWithPayload(payload)
 	}
-	_ = w.conn.Close()
+	payload := websocket.FormatCloseMessage(
+		websocket.CloseInternalServerErr,
+		truncateWebsocketCloseReason(wsUpstreamDisconnectCloseReason, wsCloseReasonMaxBytes),
+	)
+	return w.closeWithPayload(payload)
 }
 
 func truncateWebsocketCloseReason(reason string, maxBytes int) string {
@@ -192,6 +259,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		return
 	}
 	writer := newResponsesWebsocketWriter(conn)
+	disconnectCoordinator := newResponsesWebsocketDisconnectCoordinator(writer)
 	passthroughSessionID := uuid.NewString()
 	downstreamSessionKey := websocketDownstreamSessionKey(c.Request)
 	retainResponsesWebsocketToolCaches(downstreamSessionKey)
@@ -220,8 +288,10 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 						select {
 						case <-wsDone:
 							return
-						case disconnectErr := <-disconnectCh:
-							writer.closeForUpstreamDisconnect(disconnectErr)
+						case disconnectErr, ok := <-disconnectCh:
+							if ok {
+								disconnectCoordinator.handle(disconnectErr)
+							}
 						}
 					}()
 				}
@@ -518,6 +588,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if pinnedAuthID != "" && !routeOverridesModelResolution {
 			cliCtx = handlers.WithPinnedAuthID(cliCtx, pinnedAuthID)
 		}
+		disconnectCoordinator.beginForward()
 		dataChan, _, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
 		if !selectedAuthObserved {
 			// Plugin/alternate routes bypass auth selection. Keep canonical HTTP-mode
@@ -544,10 +615,22 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				suppressError: replayPinnedAuthFailure,
 			},
 		)
+		upstreamDisconnected, errDisconnectClose := disconnectCoordinator.endForward()
 		if errForward != nil {
 			wsTerminateErr = errForward
 			if !errors.Is(errForward, websocket.ErrCloseSent) {
 				log.Warnf("responses websocket: forward failed id=%s error=%v", passthroughSessionID, errForward)
+			}
+			return
+		}
+		if upstreamDisconnected {
+			if forwardErrMsg != nil && forwardErrMsg.Error != nil {
+				wsTerminateErr = forwardErrMsg.Error
+			} else {
+				wsTerminateErr = errors.New(wsUpstreamDisconnectCloseReason)
+			}
+			if errDisconnectClose != nil && !errors.Is(errDisconnectClose, websocket.ErrCloseSent) {
+				log.Debugf("responses websocket: upstream disconnect close failed id=%s error=%v", passthroughSessionID, errDisconnectClose)
 			}
 			return
 		}
