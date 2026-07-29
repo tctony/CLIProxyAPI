@@ -59,3 +59,11 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - Timeouts are allowed only during credential acquisition; after an upstream connection is established, do not set timeouts for any subsequent network behavior. Intentional exceptions that must remain allowed are the Codex websocket liveness deadlines in `internal/runtime/executor/codex_websockets_executor.go`, the wsrelay session deadlines in `internal/wsrelay/session.go`, the management APICall timeout in `internal/api/handlers/management/api_tools.go`, and the `cmd/fetch_antigravity_models` utility timeouts
 - Avoid wall-clock `time.Sleep` in TTL, expiration, ordering, or cache-eviction unit tests due to platform timer granularity (e.g. Windows default timer resolution of ~15.6ms) and CI jitter under load; prefer controllable clocks (`nowFunc` / mock clock), explicit timestamp manipulation, or deterministic synchronization primitives.
 - Note: if modifying features that involve CLIProxyAPIHome, check if corresponding updates are needed in the CLIProxyAPIHome repository.
+
+## Fork DevOps
+- Fork repository: `https://github.com/tctony/CLIProxyAPI`
+- Keep `main` aligned with `upstream/main`; use `develop` for personal development.
+- Run `go test ./...` locally before committing. The fork image workflow intentionally performs the required compile check but does not run the full test suite.
+- A push to `develop` triggers `.github/workflows/fork-image.yml`; the workflow can also be started manually.
+- The workflow publishes a public `linux/amd64` image to `ghcr.io/tctony/cliproxyapi` with an immutable `sha-<12-character-commit>` tag.
+- Deploy and roll back with an explicit `sha-*` tag. Do not deploy this fork with `latest`.
