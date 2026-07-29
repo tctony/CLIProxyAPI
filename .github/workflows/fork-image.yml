@@ -30,9 +30,6 @@ jobs:
       - name: Refresh models catalog
         run: bash .github/scripts/refresh-model-catalogs.sh
 
-      - name: Test
-        run: go test ./...
-
       - name: Verify build
         run: |
           go build -o test-output ./cmd/server

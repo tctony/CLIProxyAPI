@@ -61,3 +61,11 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - Avoid wall-clock `time.Sleep` in TTL, expiration, ordering, or cache-eviction unit tests due to platform timer granularity (e.g. Windows default timer resolution of ~15.6ms) and CI jitter under load; prefer controllable clocks (`nowFunc` / mock clock), explicit timestamp manipulation, or deterministic synchronization primitives.
 - Note: if modifying features that involve CLIProxyAPIHome, check if corresponding updates are needed in the CLIProxyAPIHome repository.
 - Endpoints under the `/v0/management` base URL are deprecated and no longer maintained. For any feature changes, do not modify endpoints under `/v0/management` unless necessary to fix compilation errors.
+
+## Fork DevOps
+- Fork repository: `https://github.com/tctony/CLIProxyAPI`
+- Keep `main` aligned with `upstream/main`; use `develop` for personal development.
+- Run `go test ./...` locally before committing. The fork image workflow intentionally performs the required compile check but does not run the full test suite.
+- A push to `develop` triggers `.github/workflows/fork-image.yml`; the workflow can also be started manually.
+- The workflow publishes a public `linux/amd64` image to `ghcr.io/tctony/cliproxyapi` with an immutable `sha-<12-character-commit>` tag.
+- Deploy and roll back with an explicit `sha-*` tag. Do not deploy this fork with `latest`.
