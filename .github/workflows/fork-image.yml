@@ -3,7 +3,7 @@ name: fork-image
 on:
   push:
     branches:
-      - develop
+      - build-image
   workflow_dispatch:
 
 permissions:
