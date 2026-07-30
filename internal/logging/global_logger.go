@@ -38,6 +38,8 @@ var logFieldOrder = []string{
 	"mode", "budget", "level", "original_mode", "original_value", "min", "max", "clamped_to", "error",
 	"credential", "connection", "proxy_scheme", "remote_transport",
 	"media_session_id", "call_id", "peer", "state", "reason",
+	"session", "active_response", "event", "last_event", "sequence", "frame_bytes", "previous_gap",
+	"frame_count", "cumulative_size", "last_frame_ago", "byte_count", "error_kind", "close_code",
 }
 
 var quotedLogFields = map[string]struct{}{
@@ -50,6 +52,10 @@ var quotedLogFields = map[string]struct{}{
 	"peer":             {},
 	"state":            {},
 	"reason":           {},
+	"session":          {},
+	"event":            {},
+	"last_event":       {},
+	"error_kind":       {},
 }
 
 var pluginPathFieldOrder = []string{"path", "active_path", "retired_path"}
