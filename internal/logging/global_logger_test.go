@@ -65,6 +65,59 @@ func TestLogFormatterPrintsMediaForwardingFields(t *testing.T) {
 	}
 }
 
+func TestLogFormatterPrintsSafeCodexWebsocketDiagnosticFields(t *testing.T) {
+	entry := log.NewEntry(log.New())
+	entry.Time = time.Date(2026, 7, 30, 6, 21, 18, 0, time.Local)
+	entry.Level = log.WarnLevel
+	entry.Message = "codex websocket upstream read stopped"
+	entry.Data["session"] = "session-id\nsecond-line"
+	entry.Data["active_response"] = true
+	entry.Data["event"] = "response.created"
+	entry.Data["last_event"] = "response.output_text.delta"
+	entry.Data["sequence"] = int64(11)
+	entry.Data["frame_bytes"] = 512
+	entry.Data["previous_gap"] = 250 * time.Millisecond
+	entry.Data["frame_count"] = uint64(37)
+	entry.Data["cumulative_size"] = uint64(8192)
+	entry.Data["last_frame_ago"] = 73 * time.Second
+	entry.Data["byte_count"] = uint64(8192)
+	entry.Data["error_kind"] = "abnormal_close"
+	entry.Data["close_code"] = 1006
+	entry.Data["payload"] = "secret output"
+
+	formatted, errFormat := (&LogFormatter{}).Format(entry)
+	if errFormat != nil {
+		t.Fatalf("Format() error = %v", errFormat)
+	}
+
+	line := string(formatted)
+	for _, want := range []string{
+		`session="session-id\nsecond-line"`,
+		"active_response=true",
+		`event="response.created"`,
+		`last_event="response.output_text.delta"`,
+		"sequence=11",
+		"frame_bytes=512",
+		"previous_gap=250ms",
+		"frame_count=37",
+		"cumulative_size=8192",
+		"last_frame_ago=1m13s",
+		"byte_count=8192",
+		`error_kind="abnormal_close"`,
+		"close_code=1006",
+	} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("formatted line %q missing %s", line, want)
+		}
+	}
+	if strings.Contains(line, "secret output") || strings.Contains(line, "payload=") {
+		t.Fatalf("formatted line contains payload data: %q", line)
+	}
+	if strings.Count(line, "\n") != 1 {
+		t.Fatalf("formatted line contains an unescaped newline: %q", line)
+	}
+}
+
 func TestLogFormatterPrintsPluginFields(t *testing.T) {
 	entry := log.NewEntry(log.New())
 	entry.Time = time.Date(2026, 6, 25, 20, 10, 0, 0, time.Local)
