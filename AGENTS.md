@@ -64,7 +64,7 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - Fork repository: `https://github.com/tctony/CLIProxyAPI`
 - Keep `main` aligned with `upstream/main`; use `develop` for personal development.
 - Run `go test ./...` locally before committing. The fork image workflow intentionally performs the required compile check but does not run the full test suite.
-- A push to `develop` triggers `.github/workflows/fork-image.yml`; the workflow can also be started manually.
+- Pushing to `develop` does not build an image. Only when the user explicitly requests an image build, manually trigger `.github/workflows/fork-image.yml` by pushing the desired `develop` commit with `git push origin develop:build-image`; do not push to `build-image` otherwise.
 - The workflow publishes a public `linux/amd64` image to `ghcr.io/tctony/cliproxyapi` with an immutable `sha-<12-character-commit>` tag.
 - Deploy and roll back with an explicit `sha-*` tag. Do not deploy this fork with `latest`.
 - Back up the deployment Compose file before changing its image. Delete that backup after the new deployment is verified; retain and use it only when verification fails and rollback is required.
