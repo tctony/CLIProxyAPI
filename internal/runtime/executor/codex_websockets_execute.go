@@ -177,9 +177,13 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 
 	var readCh chan codexWebsocketRead
 	if sess != nil {
-		readCh = sess.activate(conn)
+		readCh = sess.activateCodexTurn(conn)
 		defer func() {
-			sess.clearActive(conn, readCh)
+			reason := "completed"
+			if err != nil {
+				reason = "error"
+			}
+			sess.finishCodexTurn(conn, readCh, reason, err)
 		}()
 	}
 
@@ -214,7 +218,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 					closeWebsocketAfterBindFailure(sess, conn, closer)
 					return resp, errBind
 				}
-				readCh = sess.activate(conn)
+				readCh = sess.activateCodexTurn(conn)
 				wsReqBodyRetry := buildCodexWebsocketRequestBody(upstreamBody)
 				helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 					URL:       wsURL,
@@ -246,6 +250,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			helps.RecordAPIWebsocketError(ctx, e.cfg, "send", errSend)
 			return resp, errSend
 		}
+	}
+	if sess != nil {
+		sess.logCodexTurnSent(conn)
 	}
 
 	outputItemsByIndex := make(map[int64][]byte)

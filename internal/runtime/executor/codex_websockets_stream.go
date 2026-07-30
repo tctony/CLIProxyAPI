@@ -181,7 +181,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 	var readCh chan codexWebsocketRead
 	if sess != nil {
-		readCh = sess.activate(conn)
+		readCh = sess.activateCodexTurn(conn)
 	}
 
 	if errSend := writeCodexWebsocketMessage(sess, conn, wsReqBody); errSend != nil {
@@ -222,7 +222,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				closeWebsocketAfterBindFailure(sess, conn, closer)
 				return nil, errBind
 			}
-			readCh = sess.activate(conn)
+			readCh = sess.activateCodexTurn(conn)
 			wsReqBodyRetry := buildCodexWebsocketRequestBody(upstreamBody)
 			helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 				URL:       wsURL,
@@ -254,6 +254,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			return nil, errSend
 		}
 	}
+	if sess != nil {
+		sess.logCodexTurnSent(conn)
+	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
@@ -263,7 +266,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		defer close(out)
 		defer func() {
 			if sess != nil {
-				sess.clearActive(conn, readCh)
+				sess.finishCodexTurn(conn, readCh, terminateReason, terminateErr)
 				unlockStreamSession()
 				return
 			}

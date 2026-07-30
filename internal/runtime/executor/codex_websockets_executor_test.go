@@ -80,6 +80,22 @@ func TestCodexWebsocketReadStatsTracksSafeEventMetadata(t *testing.T) {
 	if got := unsafeFields["event"]; got != "<invalid>" {
 		t.Fatalf("unsafe event type = %v, want <invalid>", got)
 	}
+
+	var itemStats codexWebsocketReadStats
+	itemFields, _ := itemStats.observeTextFrame(startedAt, []byte(
+		`{"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","content":"secret"}}`,
+	))
+	if got := itemFields["output_index"]; got != int64(0) {
+		t.Fatalf("output_index = %v, want 0", got)
+	}
+	if got := itemFields["item_type"]; got != "reasoning" {
+		t.Fatalf("item_type = %v, want reasoning", got)
+	}
+	for key, value := range itemFields {
+		if strings.Contains(fmt.Sprint(value), "secret") {
+			t.Fatalf("unsafe item metadata field %q=%v", key, value)
+		}
+	}
 }
 
 func TestCodexWebsocketReadStatsSummarizesReadStop(t *testing.T) {
@@ -128,6 +144,90 @@ func TestCodexWebsocketReadStatsSummarizesReadStop(t *testing.T) {
 				t.Fatalf("close_code = %v, want %d", got, tt.wantCode)
 			}
 		})
+	}
+}
+
+func TestCodexWebsocketTurnStatsTracksRepeatedFrameActivity(t *testing.T) {
+	startedAt := time.Date(2026, time.July, 30, 5, 56, 26, 596000000, time.FixedZone("CST", 8*60*60))
+	stats := newCodexWebsocketTurnStats(104, startedAt)
+	firstPayload := []byte(`{"type":"response.created","sequence_number":1,"secret":"request data"}`)
+
+	firstAt := startedAt.Add(364 * time.Millisecond)
+	first, changed, activity := stats.observeTextFrame(firstAt, firstPayload)
+	if !changed || activity {
+		t.Fatalf("first frame changed=%v activity=%v, want true false", changed, activity)
+	}
+	if got := first["turn"]; got != uint64(104) {
+		t.Fatalf("turn = %v, want 104", got)
+	}
+	if got := first["first_frame"]; got != true {
+		t.Fatalf("first_frame = %v, want true", got)
+	}
+	if got := first["turn_elapsed"]; got != 364*time.Millisecond {
+		t.Fatalf("turn_elapsed = %v, want 364ms", got)
+	}
+
+	repeatedPayload := []byte(`{"type":"response.output_text.delta","sequence_number":2,"delta":"secret output"}`)
+	secondAt := firstAt.Add(time.Second)
+	_, changed, activity = stats.observeTextFrame(secondAt, repeatedPayload)
+	if !changed || activity {
+		t.Fatalf("event transition changed=%v activity=%v, want true false", changed, activity)
+	}
+
+	thirdAt := secondAt.Add(time.Second)
+	_, changed, activity = stats.observeTextFrame(thirdAt, repeatedPayload)
+	if changed || activity {
+		t.Fatalf("early repeated frame changed=%v activity=%v, want false false", changed, activity)
+	}
+
+	activityAt := secondAt.Add(codexWebsocketActivityLogInterval)
+	periodic, changed, activity := stats.observeTextFrame(activityAt, repeatedPayload)
+	if changed || !activity {
+		t.Fatalf("periodic frame changed=%v activity=%v, want false true", changed, activity)
+	}
+	if got := periodic["turn_previous_gap"]; got != codexWebsocketActivityLogInterval-time.Second {
+		t.Fatalf("turn_previous_gap = %v, want 9s", got)
+	}
+	if got := periodic["turn_frame_count"]; got != uint64(4) {
+		t.Fatalf("turn_frame_count = %v, want 4", got)
+	}
+
+	stopAt := activityAt.Add(113 * time.Second)
+	summary := stats.fields(stopAt)
+	if got := summary["turn_last_frame_ago"]; got != 113*time.Second {
+		t.Fatalf("turn_last_frame_ago = %v, want 1m53s", got)
+	}
+	wantBytes := uint64(len(firstPayload) + 3*len(repeatedPayload))
+	if got := summary["turn_byte_count"]; got != wantBytes {
+		t.Fatalf("turn_byte_count = %v, want %d", got, wantBytes)
+	}
+	for key, value := range summary {
+		if strings.Contains(fmt.Sprint(value), "secret") {
+			t.Fatalf("unsafe turn metadata field %q=%v", key, value)
+		}
+	}
+}
+
+func TestCodexWebsocketSessionAssignsSequentialTurnIDs(t *testing.T) {
+	sess := &codexWebsocketSession{sessionID: "session-1"}
+	conn := &websocket.Conn{}
+
+	firstCh := sess.activateCodexTurn(conn)
+	_, _, firstTurn := sess.activeCodexForConn(conn)
+	if firstTurn == nil || firstTurn.turnID != 1 {
+		t.Fatalf("first turn = %#v, want turn 1", firstTurn)
+	}
+	if !sess.clearActive(conn, firstCh) {
+		t.Fatal("failed to clear first turn")
+	}
+
+	secondCh := sess.activateCodexTurn(conn)
+	_, _, secondTurn := sess.activeCodexForConn(conn)
+	if secondTurn == nil || secondTurn.turnID != 2 {
+		t.Fatalf("second turn = %#v, want turn 2", secondTurn)
+	}
+	if !sess.clearActive(conn, secondCh) {
+		t.Fatal("failed to clear second turn")
 	}
 }
 

@@ -38,8 +38,12 @@ var logFieldOrder = []string{
 	"mode", "budget", "level", "original_mode", "original_value", "min", "max", "clamped_to", "error",
 	"credential", "connection", "proxy_scheme", "remote_transport",
 	"media_session_id", "call_id", "peer", "state", "reason",
-	"session", "active_response", "event", "last_event", "sequence", "frame_bytes", "previous_gap",
+	"session", "active_response", "event", "item_type", "output_index",
+	"last_event", "sequence", "frame_bytes", "previous_gap",
 	"frame_count", "cumulative_size", "last_frame_ago", "byte_count", "error_kind", "close_code",
+	"turn", "turn_started_at", "turn_elapsed", "turn_last_event", "turn_last_frame_ago",
+	"turn_frame_count", "turn_byte_count", "turn_previous_gap", "first_frame", "connection_elapsed",
+	"observed_at", "control", "control_bytes", "pong_sent",
 }
 
 var quotedLogFields = map[string]struct{}{
@@ -54,8 +58,13 @@ var quotedLogFields = map[string]struct{}{
 	"reason":           {},
 	"session":          {},
 	"event":            {},
+	"item_type":        {},
 	"last_event":       {},
 	"error_kind":       {},
+	"turn_started_at":  {},
+	"turn_last_event":  {},
+	"observed_at":      {},
+	"control":          {},
 }
 
 var pluginPathFieldOrder = []string{"path", "active_path", "retired_path"}
