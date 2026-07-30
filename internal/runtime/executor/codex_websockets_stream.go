@@ -150,7 +150,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 	var readCh chan codexWebsocketRead
 	if sess != nil {
-		readCh = sess.activate(conn)
+		readCh = sess.activateCodexTurn(conn)
 	}
 	restoreMultiAgentV2 := !multiAgentV2Conflict && (optimizeMultiAgentV2 || sess.isMultiAgentV2Optimized(conn))
 
@@ -193,7 +193,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				closeWebsocketAfterBindFailure(sess, conn, closer)
 				return nil, errBind
 			}
-			readCh = sess.activate(conn)
+			readCh = sess.activateCodexTurn(conn)
 			restoreMultiAgentV2 = !multiAgentV2Conflict && (optimizeMultiAgentV2 || sess.isMultiAgentV2Optimized(conn))
 			wsReqBodyRetry := buildCodexWebsocketRequestBody(upstreamBody)
 			helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
@@ -234,6 +234,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 			return nil, errSend
 		}
+	}
+	if sess != nil {
+		sess.logCodexTurnSent(conn)
 	}
 
 	if optimizeMultiAgentV2 || multiAgentV2Conflict {
@@ -551,7 +554,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		defer close(out)
 		defer func() {
 			if sess != nil {
-				sess.clearActive(conn, readCh)
+				sess.finishCodexTurn(conn, readCh, terminateReason, terminateErr)
 				unlockStreamSession()
 				if isEphemeralSession {
 					closeCodexWebsocketSession(sess, terminateReason)

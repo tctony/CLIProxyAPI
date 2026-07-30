@@ -73,6 +73,8 @@ type codexWebsocketSession struct {
 	activeCh     chan codexWebsocketRead
 	activeDone   <-chan struct{}
 	activeCancel context.CancelFunc
+	activeTurn   *codexWebsocketTurnStats
+	turnSequence uint64
 
 	readerConn *websocket.Conn
 
@@ -95,15 +97,99 @@ type codexWebsocketRead struct {
 }
 
 type codexWebsocketReadStats struct {
+	startedAt   time.Time
 	lastFrameAt time.Time
 	lastEvent   string
 	frameCount  uint64
 	byteCount   uint64
 }
 
+const codexWebsocketActivityLogInterval = 10 * time.Second
+
+type codexWebsocketTurnStats struct {
+	mu sync.Mutex
+
+	turnID               uint64
+	startedAt            time.Time
+	lastFrameAt          time.Time
+	lastActivityLoggedAt time.Time
+	lastEvent            string
+	frameCount           uint64
+	byteCount            uint64
+}
+
+func newCodexWebsocketTurnStats(turnID uint64, startedAt time.Time) *codexWebsocketTurnStats {
+	return &codexWebsocketTurnStats{turnID: turnID, startedAt: startedAt}
+}
+
+func (s *codexWebsocketTurnStats) observeTextFrame(now time.Time, payload []byte) (log.Fields, bool, bool) {
+	if s == nil {
+		return nil, false, false
+	}
+	eventType := safeCodexWebsocketEventType(gjson.GetBytes(payload, "type").String())
+	s.mu.Lock()
+	previousGap := time.Duration(0)
+	if !s.lastFrameAt.IsZero() {
+		previousGap = now.Sub(s.lastFrameAt)
+	}
+	firstFrame := s.frameCount == 0
+	eventChanged := firstFrame || eventType != s.lastEvent
+	s.frameCount++
+	s.byteCount += uint64(len(payload))
+	s.lastFrameAt = now
+	s.lastEvent = eventType
+	logActivity := !eventChanged && (s.lastActivityLoggedAt.IsZero() ||
+		now.Sub(s.lastActivityLoggedAt) >= codexWebsocketActivityLogInterval)
+	if eventChanged || logActivity {
+		s.lastActivityLoggedAt = now
+	}
+	fields := s.fieldsLocked(now)
+	fields["event"] = eventType
+	fields["sequence"] = gjson.GetBytes(payload, "sequence_number").Int()
+	fields["frame_bytes"] = len(payload)
+	fields["turn_previous_gap"] = previousGap
+	fields["first_frame"] = firstFrame
+	addCodexWebsocketItemMetadata(fields, payload)
+	s.mu.Unlock()
+	return fields, eventChanged, logActivity
+}
+
+func (s *codexWebsocketTurnStats) fields(now time.Time) log.Fields {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	fields := s.fieldsLocked(now)
+	s.mu.Unlock()
+	return fields
+}
+
+func (s *codexWebsocketTurnStats) fieldsLocked(now time.Time) log.Fields {
+	fields := log.Fields{
+		"turn":                s.turnID,
+		"turn_started_at":     s.startedAt.Format(time.RFC3339Nano),
+		"turn_elapsed":        now.Sub(s.startedAt),
+		"turn_last_event":     "<none>",
+		"turn_last_frame_ago": time.Duration(0),
+		"turn_frame_count":    s.frameCount,
+		"turn_byte_count":     s.byteCount,
+		"observed_at":         now.Format(time.RFC3339Nano),
+	}
+	if s.lastEvent != "" {
+		fields["turn_last_event"] = s.lastEvent
+	}
+	if !s.lastFrameAt.IsZero() {
+		fields["turn_last_frame_ago"] = now.Sub(s.lastFrameAt)
+	}
+	return fields
+}
+
 func (s *codexWebsocketReadStats) observeTextFrame(now time.Time, payload []byte) (log.Fields, bool) {
 	if s == nil {
 		return nil, false
+	}
+	if s.startedAt.IsZero() {
+		s.startedAt = now
 	}
 	eventType := safeCodexWebsocketEventType(gjson.GetBytes(payload, "type").String())
 	previousGap := time.Duration(0)
@@ -113,18 +199,20 @@ func (s *codexWebsocketReadStats) observeTextFrame(now time.Time, payload []byte
 	s.frameCount++
 	s.byteCount += uint64(len(payload))
 	s.lastFrameAt = now
-	if eventType == s.lastEvent {
-		return nil, false
-	}
+	changed := eventType != s.lastEvent
 	s.lastEvent = eventType
-	return log.Fields{
-		"event":           eventType,
-		"sequence":        gjson.GetBytes(payload, "sequence_number").Int(),
-		"frame_bytes":     len(payload),
-		"previous_gap":    previousGap,
-		"frame_count":     s.frameCount,
-		"cumulative_size": s.byteCount,
-	}, true
+	fields := log.Fields{
+		"event":              eventType,
+		"sequence":           gjson.GetBytes(payload, "sequence_number").Int(),
+		"frame_bytes":        len(payload),
+		"previous_gap":       previousGap,
+		"frame_count":        s.frameCount,
+		"cumulative_size":    s.byteCount,
+		"observed_at":        now.Format(time.RFC3339Nano),
+		"connection_elapsed": now.Sub(s.startedAt),
+	}
+	addCodexWebsocketItemMetadata(fields, payload)
+	return fields, changed
 }
 
 func safeCodexWebsocketEventType(eventType string) string {
@@ -145,14 +233,28 @@ func safeCodexWebsocketEventType(eventType string) string {
 	return eventType
 }
 
+func addCodexWebsocketItemMetadata(fields log.Fields, payload []byte) {
+	if fields == nil {
+		return
+	}
+	if outputIndex := gjson.GetBytes(payload, "output_index"); outputIndex.Exists() {
+		fields["output_index"] = outputIndex.Int()
+	}
+	if itemType := gjson.GetBytes(payload, "item.type"); itemType.Exists() {
+		fields["item_type"] = safeCodexWebsocketEventType(itemType.String())
+	}
+}
+
 func (s *codexWebsocketReadStats) readStopFields(now time.Time, active bool, err error) log.Fields {
 	fields := log.Fields{
-		"active_response": active,
-		"last_event":      "<none>",
-		"last_frame_ago":  time.Duration(0),
-		"frame_count":     uint64(0),
-		"byte_count":      uint64(0),
-		"error_kind":      codexWebsocketReadErrorKind(err),
+		"active_response":    active,
+		"last_event":         "<none>",
+		"last_frame_ago":     time.Duration(0),
+		"frame_count":        uint64(0),
+		"byte_count":         uint64(0),
+		"error_kind":         codexWebsocketReadErrorKind(err),
+		"observed_at":        now.Format(time.RFC3339Nano),
+		"connection_elapsed": time.Duration(0),
 	}
 	if s != nil {
 		if s.lastEvent != "" {
@@ -163,6 +265,9 @@ func (s *codexWebsocketReadStats) readStopFields(now time.Time, active bool, err
 		}
 		fields["frame_count"] = s.frameCount
 		fields["byte_count"] = s.byteCount
+		if !s.startedAt.IsZero() {
+			fields["connection_elapsed"] = now.Sub(s.startedAt)
+		}
 	}
 	var closeErr *websocket.CloseError
 	if errors.As(err, &closeErr) {
@@ -199,6 +304,14 @@ func codexWebsocketReadErrorKind(err error) string {
 }
 
 func (s *codexWebsocketSession) setActive(conn *websocket.Conn, ch chan codexWebsocketRead) {
+	s.setActiveWithCodexTurn(conn, ch, nil)
+}
+
+func (s *codexWebsocketSession) setActiveWithCodexTurn(
+	conn *websocket.Conn,
+	ch chan codexWebsocketRead,
+	turn *codexWebsocketTurnStats,
+) {
 	if s == nil {
 		return
 	}
@@ -210,6 +323,7 @@ func (s *codexWebsocketSession) setActive(conn *websocket.Conn, ch chan codexWeb
 	}
 	s.activeConn = conn
 	s.activeCh = ch
+	s.activeTurn = turn
 	if conn != nil && ch != nil {
 		activeCtx, activeCancel := context.WithCancel(context.Background())
 		s.activeDone = activeCtx.Done()
@@ -227,16 +341,53 @@ func (s *codexWebsocketSession) activate(conn *websocket.Conn) chan codexWebsock
 	return ch
 }
 
-func (s *codexWebsocketSession) activeForConn(conn *websocket.Conn) (chan codexWebsocketRead, <-chan struct{}) {
+func (s *codexWebsocketSession) activateCodexTurn(conn *websocket.Conn) chan codexWebsocketRead {
 	if s == nil || conn == nil {
-		return nil, nil
+		return nil
+	}
+	now := time.Now()
+	ch := make(chan codexWebsocketRead, 4096)
+	s.activeMu.Lock()
+	s.turnSequence++
+	turn := newCodexWebsocketTurnStats(s.turnSequence, now)
+	s.activeMu.Unlock()
+	s.setActiveWithCodexTurn(conn, ch, turn)
+	fields := turn.fields(now)
+	fields["session"] = s.sessionID
+	log.WithFields(fields).Info("codex websocket upstream turn activated")
+	return ch
+}
+
+func (s *codexWebsocketSession) logCodexTurnSent(conn *websocket.Conn) {
+	if s == nil || conn == nil {
+		return
+	}
+	_, _, turn := s.activeCodexForConn(conn)
+	if turn == nil {
+		return
+	}
+	fields := turn.fields(time.Now())
+	fields["session"] = s.sessionID
+	log.WithFields(fields).Info("codex websocket upstream turn sent")
+}
+
+func (s *codexWebsocketSession) activeForConn(conn *websocket.Conn) (chan codexWebsocketRead, <-chan struct{}) {
+	ch, done, _ := s.activeCodexForConn(conn)
+	return ch, done
+}
+
+func (s *codexWebsocketSession) activeCodexForConn(
+	conn *websocket.Conn,
+) (chan codexWebsocketRead, <-chan struct{}, *codexWebsocketTurnStats) {
+	if s == nil || conn == nil {
+		return nil, nil, nil
 	}
 	s.activeMu.Lock()
 	defer s.activeMu.Unlock()
 	if s.activeConn != conn {
-		return nil, nil
+		return nil, nil, nil
 	}
-	return s.activeCh, s.activeDone
+	return s.activeCh, s.activeDone, s.activeTurn
 }
 
 func clearRetryActiveState(sess *codexWebsocketSession, conn *websocket.Conn, ch chan codexWebsocketRead) bool {
@@ -247,22 +398,52 @@ func clearRetryActiveState(sess *codexWebsocketSession, conn *websocket.Conn, ch
 }
 
 func (s *codexWebsocketSession) clearActive(conn *websocket.Conn, ch chan codexWebsocketRead) bool {
+	_, cleared := s.takeActive(conn, ch)
+	return cleared
+}
+
+func (s *codexWebsocketSession) finishCodexTurn(
+	conn *websocket.Conn,
+	ch chan codexWebsocketRead,
+	reason string,
+	err error,
+) bool {
+	turn, cleared := s.takeActive(conn, ch)
+	if !cleared || turn == nil {
+		return cleared
+	}
+	fields := turn.fields(time.Now())
+	fields["session"] = s.sessionID
+	fields["reason"] = strings.TrimSpace(reason)
+	if err != nil {
+		fields["error_kind"] = codexWebsocketReadErrorKind(err)
+	}
+	log.WithFields(fields).Info("codex websocket upstream turn finished")
+	return true
+}
+
+func (s *codexWebsocketSession) takeActive(
+	conn *websocket.Conn,
+	ch chan codexWebsocketRead,
+) (*codexWebsocketTurnStats, bool) {
 	if s == nil {
-		return false
+		return nil, false
 	}
 	s.activeMu.Lock()
 	defer s.activeMu.Unlock()
 	if s.activeConn != conn || s.activeCh != ch {
-		return false
+		return nil, false
 	}
+	turn := s.activeTurn
 	s.activeConn = nil
 	s.activeCh = nil
+	s.activeTurn = nil
 	if s.activeCancel != nil {
 		s.activeCancel()
 	}
 	s.activeCancel = nil
 	s.activeDone = nil
-	return true
+	return turn, true
 }
 
 const codexWebsocketWriteChunkSize = 32 * 1024
@@ -360,29 +541,48 @@ func (s *codexWebsocketSession) configureConn(conn *websocket.Conn) {
 	}
 	s.resetUpstreamDisconnectError(conn)
 	conn.SetPingHandler(func(appData string) error {
-		sessionID := ""
-		if s != nil {
-			sessionID = s.sessionID
-		}
-		sessionKind := sessionObjectKind(s)
-		log.Debugf("codex websockets: upstream ping received session=%s session_object=%s ping_bytes=%d", sessionID, sessionKind, len(appData))
-		log.Debugf("codex websockets: upstream pong write started session=%s session_object=%s", sessionID, sessionKind)
-		start := time.Now()
-		// Gorilla websocket allows concurrent WriteControl with WriteMessage.
-		// Avoid writeMu here so keepalive pongs are not starved by long payload writes.
-		errPong := conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(10*time.Second))
-		if errPong != nil {
-			log.Warnf("codex websockets: upstream pong write failed session=%s session_object=%s duration=%v err=%v", sessionID, sessionKind, time.Since(start), errPong)
+		now := time.Now()
+		fields := s.codexControlFields(conn, now, "ping", len(appData))
+		// WriteControl can run concurrently with data writes, so a long write cannot starve the pong.
+		errWrite := conn.WriteControl(websocket.PongMessage, []byte(appData), now.Add(10*time.Second))
+		fields["pong_sent"] = errWrite == nil
+		fields["pong_write_duration"] = time.Since(now)
+		if errWrite != nil {
+			log.WithFields(fields).Warn("codex websocket upstream control")
 		} else {
-			log.Debugf("codex websockets: upstream pong replied session=%s session_object=%s duration=%v", sessionID, sessionKind, time.Since(start))
+			log.WithFields(fields).Info("codex websocket upstream control")
 		}
-		return errPong
+		return errWrite
+	})
+	conn.SetPongHandler(func(appData string) error {
+		fields := s.codexControlFields(conn, time.Now(), "pong", len(appData))
+		log.WithFields(fields).Info("codex websocket upstream control")
+		return nil
 	})
 	defaultCloseHandler := conn.CloseHandler()
 	conn.SetCloseHandler(func(code int, text string) error {
 		s.setUpstreamDisconnectError(conn, &websocket.CloseError{Code: code, Text: text})
 		return defaultCloseHandler(code, text)
 	})
+}
+
+func (s *codexWebsocketSession) codexControlFields(
+	conn *websocket.Conn,
+	now time.Time,
+	control string,
+	controlBytes int,
+) log.Fields {
+	fields := log.Fields{
+		"session":       s.sessionID,
+		"control":       control,
+		"control_bytes": controlBytes,
+		"observed_at":   now.Format(time.RFC3339Nano),
+	}
+	_, _, turn := s.activeCodexForConn(conn)
+	for key, value := range turn.fields(now) {
+		fields[key] = value
+	}
+	return fields
 }
 
 func (s *codexWebsocketSession) bindExecutionLifecycle(opts cliproxyexecutor.Options, conn *websocket.Conn, closer *websocketConnectionCloser, model string) error {
@@ -772,14 +972,18 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 	if e == nil || sess == nil || conn == nil {
 		return
 	}
-	var stats codexWebsocketReadStats
+	stats := codexWebsocketReadStats{startedAt: time.Now()}
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(codexResponsesWebsocketIdleTimeout))
 		msgType, payload, errRead := conn.ReadMessage()
 		if errRead != nil {
-			ch, done := sess.activeForConn(conn)
-			fields := stats.readStopFields(time.Now(), ch != nil, errRead)
+			now := time.Now()
+			ch, done, turn := sess.activeCodexForConn(conn)
+			fields := stats.readStopFields(now, ch != nil, errRead)
 			fields["session"] = sess.sessionID
+			for key, value := range turn.fields(now) {
+				fields[key] = value
+			}
 			if ch != nil && codexWebsocketReadErrorKind(errRead) != "local_close" {
 				log.WithFields(fields).Warn("codex websocket upstream read stopped")
 			} else {
@@ -831,11 +1035,26 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 			}
 		}
 
-		ch, done := sess.activeForConn(conn)
-		if fields, changed := stats.observeTextFrame(time.Now(), payload); changed {
+		ch, done, turn := sess.activeCodexForConn(conn)
+		now := time.Now()
+		fields, changed := stats.observeTextFrame(now, payload)
+		logActivity := false
+		if turn != nil {
+			turnFields, turnChanged, turnActivity := turn.observeTextFrame(now, payload)
+			for key, value := range turnFields {
+				fields[key] = value
+			}
+			changed = turnChanged
+			logActivity = turnActivity
+		}
+		if changed {
 			fields["session"] = sess.sessionID
 			fields["active_response"] = ch != nil
 			log.WithFields(fields).Info("codex websocket upstream event")
+		} else if logActivity {
+			fields["session"] = sess.sessionID
+			fields["active_response"] = ch != nil
+			log.WithFields(fields).Info("codex websocket upstream activity")
 		}
 		if ch == nil {
 			continue

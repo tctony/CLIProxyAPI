@@ -73,6 +73,8 @@ func TestLogFormatterPrintsSafeCodexWebsocketDiagnosticFields(t *testing.T) {
 	entry.Data["session"] = "session-id\nsecond-line"
 	entry.Data["active_response"] = true
 	entry.Data["event"] = "response.created"
+	entry.Data["item_type"] = "reasoning"
+	entry.Data["output_index"] = int64(0)
 	entry.Data["last_event"] = "response.output_text.delta"
 	entry.Data["sequence"] = int64(11)
 	entry.Data["frame_bytes"] = 512
@@ -83,6 +85,20 @@ func TestLogFormatterPrintsSafeCodexWebsocketDiagnosticFields(t *testing.T) {
 	entry.Data["byte_count"] = uint64(8192)
 	entry.Data["error_kind"] = "abnormal_close"
 	entry.Data["close_code"] = 1006
+	entry.Data["turn"] = uint64(104)
+	entry.Data["turn_started_at"] = "2026-07-30T05:56:26.596+08:00"
+	entry.Data["turn_elapsed"] = 156408 * time.Millisecond
+	entry.Data["turn_last_event"] = "response.output_text.delta"
+	entry.Data["turn_last_frame_ago"] = 113 * time.Second
+	entry.Data["turn_frame_count"] = uint64(41)
+	entry.Data["turn_byte_count"] = uint64(4096)
+	entry.Data["turn_previous_gap"] = 10 * time.Second
+	entry.Data["first_frame"] = false
+	entry.Data["connection_elapsed"] = 34*time.Minute + 29*time.Second
+	entry.Data["observed_at"] = "2026-07-30T05:59:03.004+08:00"
+	entry.Data["control"] = "ping"
+	entry.Data["control_bytes"] = 8
+	entry.Data["pong_sent"] = true
 	entry.Data["payload"] = "secret output"
 
 	formatted, errFormat := (&LogFormatter{}).Format(entry)
@@ -95,6 +111,8 @@ func TestLogFormatterPrintsSafeCodexWebsocketDiagnosticFields(t *testing.T) {
 		`session="session-id\nsecond-line"`,
 		"active_response=true",
 		`event="response.created"`,
+		`item_type="reasoning"`,
+		"output_index=0",
 		`last_event="response.output_text.delta"`,
 		"sequence=11",
 		"frame_bytes=512",
@@ -105,6 +123,20 @@ func TestLogFormatterPrintsSafeCodexWebsocketDiagnosticFields(t *testing.T) {
 		"byte_count=8192",
 		`error_kind="abnormal_close"`,
 		"close_code=1006",
+		"turn=104",
+		`turn_started_at="2026-07-30T05:56:26.596+08:00"`,
+		"turn_elapsed=2m36.408s",
+		`turn_last_event="response.output_text.delta"`,
+		"turn_last_frame_ago=1m53s",
+		"turn_frame_count=41",
+		"turn_byte_count=4096",
+		"turn_previous_gap=10s",
+		"first_frame=false",
+		"connection_elapsed=34m29s",
+		`observed_at="2026-07-30T05:59:03.004+08:00"`,
+		`control="ping"`,
+		"control_bytes=8",
+		"pong_sent=true",
 	} {
 		if !strings.Contains(line, want) {
 			t.Fatalf("formatted line %q missing %s", line, want)
