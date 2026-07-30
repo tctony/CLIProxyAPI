@@ -202,9 +202,13 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 
 	var readCh chan codexWebsocketRead
 	if sess != nil {
-		readCh = sess.activate(conn)
+		readCh = sess.activateCodexTurn(conn)
 		defer func() {
-			sess.clearActive(conn, readCh)
+			reason := "completed"
+			if err != nil {
+				reason = "error"
+			}
+			sess.finishCodexTurn(conn, readCh, reason, err)
 		}()
 	}
 	restoreMultiAgentV2 := !multiAgentV2Conflict && (optimizeMultiAgentV2 || sess.isMultiAgentV2Optimized(conn))
@@ -241,7 +245,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 					closeWebsocketAfterBindFailure(sess, conn, closer)
 					return resp, errBind
 				}
-				readCh = sess.activate(conn)
+				readCh = sess.activateCodexTurn(conn)
 				restoreMultiAgentV2 = !multiAgentV2Conflict && (optimizeMultiAgentV2 || sess.isMultiAgentV2Optimized(conn))
 				wsReqBodyRetry := frameCodexWebsocketRequestBody(body)
 				helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
@@ -282,6 +286,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			helps.RecordAPIWebsocketError(ctx, e.cfg, "send", errSend)
 			return resp, errSend
 		}
+	}
+	if sess != nil {
+		sess.logCodexTurnSent(conn)
 	}
 
 	if optimizeMultiAgentV2 || multiAgentV2Conflict {
