@@ -61,7 +61,7 @@ type SDKConfig struct {
 	// Default is false (disabled).
 	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`
 
-	// Streaming configures server-side streaming behavior (keep-alives and safe bootstrap retries).
+	// Streaming configures server-side streaming behavior.
 	Streaming StreamingConfig `yaml:"streaming" json:"streaming"`
 
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
@@ -81,6 +81,10 @@ type StreamingConfig struct {
 	// or WebSocket Ping control frames.
 	// <= 0 disables keep-alives. Default is 0.
 	KeepAliveSeconds int `yaml:"keepalive-seconds,omitempty" json:"keepalive-seconds,omitempty"`
+
+	// StreamIdleTimeoutSeconds controls how long an active Codex Responses WebSocket turn waits
+	// for the next upstream data message. Default is 45 seconds.
+	StreamIdleTimeoutSeconds int `yaml:"stream-idle-timeout-seconds,omitempty" json:"stream-idle-timeout-seconds,omitempty"`
 
 	// BootstrapRetries controls how many times the server may retry a streaming request before any bytes are sent,
 	// to allow auth rotation / transient recovery.

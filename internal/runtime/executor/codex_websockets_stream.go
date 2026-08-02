@@ -238,6 +238,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	if sess != nil {
 		sess.logCodexTurnSent(conn)
 	}
+	streamIdleTimeout := codexResponsesWebsocketStreamIdleTimeout(e.cfg)
 
 	if optimizeMultiAgentV2 || multiAgentV2Conflict {
 		sess.setMultiAgentV2Optimized(conn, optimizeMultiAgentV2 && !multiAgentV2Conflict)
@@ -288,9 +289,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				}
 				return nil, ctx.Err()
 			}
-			msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh)
+			msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh, streamIdleTimeout)
 			if errRead != nil {
-				mappedErr := mapCodexWebsocketReadError(errRead)
+				mappedErr := e.handleCodexWebsocketReadError(sess, conn, errRead)
 				if sess != nil {
 					e.invalidateUpstreamConn(sess, conn, "read_error", mappedErr)
 					sess.clearActive(conn, readCh)
@@ -309,7 +310,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			// Count every message ReadMessage returns, including the ones this loop goes on to skip,
 			// so a peer sending only skippable text frames still closes the window. Control frames
 			// are not counted: the websocket library answers ping and pong inside ReadMessage and
-			// never returns them, so only the read deadline bounds a peer that sends nothing else.
+			// never returns them, so only the turn idle timeout bounds a peer that sends nothing else.
 			// windowOpen is carried into the skip branches below rather than breaking here, because
 			// this message has not been processed yet and dropping it would lose a token, or a
 			// terminal event, from the turn.
@@ -587,7 +588,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				_ = send(cliproxyexecutor.StreamChunk{Err: ctx.Err()})
 				return
 			}
-			msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh)
+			msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh, streamIdleTimeout)
 			if errRead != nil {
 				if sess != nil && ctx != nil && ctx.Err() != nil {
 					terminateReason = "context_done"
@@ -595,7 +596,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					_ = send(cliproxyexecutor.StreamChunk{Err: ctx.Err()})
 					return
 				}
-				mappedErr := mapCodexWebsocketReadError(errRead)
+				mappedErr := e.handleCodexWebsocketReadError(sess, conn, errRead)
 				terminateReason = "read_error"
 				terminateErr = mappedErr
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "read", mappedErr)

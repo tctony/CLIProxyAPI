@@ -359,7 +359,8 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 		outputItems := make(map[int64][]byte)
 		var outputFallback [][]byte
 		for {
-			kind, payload, errRead := readCodexWebsocketMessage(streamCtx, sess, conn, readCh)
+			// A duplex connection may wait between turns for client tool results or a new request.
+			kind, payload, errRead := readCodexWebsocketMessage(streamCtx, sess, conn, readCh, 0)
 			if errRead != nil {
 				select {
 				case errWrite := <-writeErrors:
