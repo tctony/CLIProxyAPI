@@ -23,10 +23,42 @@ import (
 )
 
 const (
-	codexResponsesWebsocketBetaHeaderValue = "responses_websockets=2026-02-06"
-	codexResponsesWebsocketIdleTimeout     = 5 * time.Minute
-	codexResponsesWebsocketHandshakeTO     = 30 * time.Second
+	codexResponsesWebsocketBetaHeaderValue                 = "responses_websockets=2026-02-06"
+	defaultCodexResponsesWebsocketStreamIdleTimeoutSeconds = 45
+	codexResponsesWebsocketHandshakeTO                     = 30 * time.Second
 )
+
+type codexWebsocketStreamIdleTimeoutError struct {
+	statusErr
+	timeout time.Duration
+}
+
+func codexResponsesWebsocketStreamIdleTimeout(cfg *config.Config) time.Duration {
+	seconds := defaultCodexResponsesWebsocketStreamIdleTimeoutSeconds
+	if cfg != nil && cfg.Streaming.StreamIdleTimeoutSeconds > 0 {
+		seconds = cfg.Streaming.StreamIdleTimeoutSeconds
+	}
+	milliseconds := time.Duration(seconds) * 1000
+	return milliseconds * time.Millisecond
+}
+
+func newCodexWebsocketStreamIdleTimeoutError(timeout time.Duration) error {
+	return &codexWebsocketStreamIdleTimeoutError{
+		statusErr: statusErr{
+			code: http.StatusGatewayTimeout,
+			msg: fmt.Sprintf(
+				`{"error":{"message":"upstream websocket stream idle timeout after %s","type":"server_error","code":"upstream_stream_idle_timeout"}}`,
+				timeout,
+			),
+		},
+		timeout: timeout,
+	}
+}
+
+func isCodexWebsocketStreamIdleTimeoutError(err error) bool {
+	var timeoutErr *codexWebsocketStreamIdleTimeoutError
+	return errors.As(err, &timeoutErr)
+}
 
 func (e *CodexWebsocketsExecutor) dialCodexWebsocket(ctx context.Context, auth *cliproxyauth.Auth, wsURL string, headers http.Header) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error) {
 	dialer := newProxyAwareWebsocketDialer(e.cfg, auth)
@@ -123,13 +155,23 @@ func buildCodexWebsocketRequestBody(body []byte) []byte {
 	return fallback
 }
 
-func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead) (int, []byte, error) {
+func readCodexWebsocketMessage(
+	ctx context.Context,
+	sess *codexWebsocketSession,
+	conn *websocket.Conn,
+	readCh chan codexWebsocketRead,
+	streamIdleTimeout time.Duration,
+) (int, []byte, error) {
 	if sess == nil {
 		if conn == nil {
 			return 0, nil, fmt.Errorf("codex websockets executor: websocket conn is nil")
 		}
-		_ = conn.SetReadDeadline(time.Now().Add(codexResponsesWebsocketIdleTimeout))
+		_ = conn.SetReadDeadline(time.Now().Add(streamIdleTimeout))
 		msgType, payload, errRead := conn.ReadMessage()
+		var netErr net.Error
+		if errors.As(errRead, &netErr) && netErr.Timeout() {
+			errRead = newCodexWebsocketStreamIdleTimeoutError(streamIdleTimeout)
+		}
 		return msgType, payload, errRead
 	}
 	if conn == nil {
@@ -138,10 +180,14 @@ func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession,
 	if readCh == nil {
 		return 0, nil, fmt.Errorf("codex websockets executor: session read channel is nil")
 	}
+	timer := time.NewTimer(streamIdleTimeout)
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return 0, nil, ctx.Err()
+		case <-timer.C:
+			return 0, nil, newCodexWebsocketStreamIdleTimeoutError(streamIdleTimeout)
 		case ev, ok := <-readCh:
 			if !ok {
 				return 0, nil, fmt.Errorf("codex websockets executor: session read channel closed")
@@ -155,6 +201,20 @@ func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession,
 			return ev.msgType, ev.payload, nil
 		}
 	}
+}
+
+func (e *CodexWebsocketsExecutor) handleCodexWebsocketReadError(
+	sess *codexWebsocketSession,
+	conn *websocket.Conn,
+	err error,
+) error {
+	mappedErr := mapCodexWebsocketReadError(err)
+	var timeoutErr *codexWebsocketStreamIdleTimeoutError
+	if errors.As(mappedErr, &timeoutErr) && sess != nil {
+		sess.logCodexTurnStreamIdleTimeout(conn, timeoutErr.timeout)
+		e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "stream_idle_timeout", mappedErr)
+	}
+	return mappedErr
 }
 
 func newProxyAwareWebsocketDialer(cfg *config.Config, auth *cliproxyauth.Auth) *websocket.Dialer {

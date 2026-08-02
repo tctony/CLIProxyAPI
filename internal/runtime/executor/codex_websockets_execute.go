@@ -254,6 +254,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	if sess != nil {
 		sess.logCodexTurnSent(conn)
 	}
+	streamIdleTimeout := codexResponsesWebsocketStreamIdleTimeout(e.cfg)
 
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
@@ -261,9 +262,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		if ctx != nil && ctx.Err() != nil {
 			return resp, ctx.Err()
 		}
-		msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh)
+		msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh, streamIdleTimeout)
 		if errRead != nil {
-			mappedErr := mapCodexWebsocketReadError(errRead)
+			mappedErr := e.handleCodexWebsocketReadError(sess, conn, errRead)
 			helps.RecordAPIWebsocketError(ctx, e.cfg, "read", mappedErr)
 			return resp, mappedErr
 		}

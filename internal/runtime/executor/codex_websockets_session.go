@@ -364,6 +364,20 @@ func (s *codexWebsocketSession) logCodexTurnSent(conn *websocket.Conn) {
 	log.WithFields(fields).Info("codex websocket upstream turn sent")
 }
 
+func (s *codexWebsocketSession) logCodexTurnStreamIdleTimeout(conn *websocket.Conn, timeout time.Duration) {
+	if s == nil || conn == nil {
+		return
+	}
+	_, _, turn := s.activeCodexForConn(conn)
+	if turn == nil {
+		return
+	}
+	fields := turn.fields(time.Now())
+	fields["session"] = s.sessionID
+	fields["stream_idle_timeout"] = timeout
+	log.WithFields(fields).Warn("codex websocket upstream turn stream idle timeout")
+}
+
 func (s *codexWebsocketSession) activeForConn(conn *websocket.Conn) (chan codexWebsocketRead, <-chan struct{}) {
 	ch, done, _ := s.activeCodexForConn(conn)
 	return ch, done
@@ -845,7 +859,6 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 	}
 	stats := codexWebsocketReadStats{startedAt: time.Now()}
 	for {
-		_ = conn.SetReadDeadline(time.Now().Add(codexResponsesWebsocketIdleTimeout))
 		msgType, payload, errRead := conn.ReadMessage()
 		if errRead != nil {
 			now := time.Now()

@@ -257,6 +257,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	if sess != nil {
 		sess.logCodexTurnSent(conn)
 	}
+	streamIdleTimeout := codexResponsesWebsocketStreamIdleTimeout(e.cfg)
 
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
@@ -300,7 +301,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				_ = send(cliproxyexecutor.StreamChunk{Err: ctx.Err()})
 				return
 			}
-			msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh)
+			msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh, streamIdleTimeout)
 			if errRead != nil {
 				if sess != nil && ctx != nil && ctx.Err() != nil {
 					terminateReason = "context_done"
@@ -308,7 +309,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					_ = send(cliproxyexecutor.StreamChunk{Err: ctx.Err()})
 					return
 				}
-				mappedErr := mapCodexWebsocketReadError(errRead)
+				mappedErr := e.handleCodexWebsocketReadError(sess, conn, errRead)
 				terminateReason = "read_error"
 				terminateErr = mappedErr
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "read", mappedErr)

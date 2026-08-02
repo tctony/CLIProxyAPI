@@ -208,6 +208,84 @@ func TestCodexWebsocketTurnStatsTracksRepeatedFrameActivity(t *testing.T) {
 	}
 }
 
+func TestCodexResponsesWebsocketStreamIdleTimeout(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *config.Config
+		want time.Duration
+	}{
+		{
+			name: "nil config uses default",
+			want: 45 * time.Second,
+		},
+		{
+			name: "zero uses default",
+			cfg:  &config.Config{},
+			want: 45 * time.Second,
+		},
+		{
+			name: "configured seconds convert through milliseconds",
+			cfg: &config.Config{SDKConfig: config.SDKConfig{Streaming: config.StreamingConfig{
+				StreamIdleTimeoutSeconds: 2,
+			}}},
+			want: 2000 * time.Millisecond,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := codexResponsesWebsocketStreamIdleTimeout(tt.cfg); got != tt.want {
+				t.Fatalf("stream idle timeout = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReadCodexWebsocketMessageTimesOutActiveTurn(t *testing.T) {
+	sess := &codexWebsocketSession{sessionID: "idle-timeout"}
+	conn := &websocket.Conn{}
+	readCh := make(chan codexWebsocketRead)
+	timeout := 20 * time.Millisecond
+	startedAt := time.Now()
+
+	_, _, err := readCodexWebsocketMessage(context.Background(), sess, conn, readCh, timeout)
+	if !isCodexWebsocketStreamIdleTimeoutError(err) {
+		t.Fatalf("read error = %v, want stream idle timeout", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed < timeout || elapsed > time.Second {
+		t.Fatalf("read elapsed = %v, want between %v and 1s", elapsed, timeout)
+	}
+	statusErr, ok := err.(interface{ StatusCode() int })
+	if !ok || statusErr.StatusCode() != http.StatusGatewayTimeout {
+		t.Fatalf("read status = %v, want %d", statusErr, http.StatusGatewayTimeout)
+	}
+	if !strings.Contains(err.Error(), `"code":"upstream_stream_idle_timeout"`) {
+		t.Fatalf("read error = %v, want structured timeout code", err)
+	}
+}
+
+func TestReadCodexWebsocketMessageReturnsBusinessFrameBeforeTimeout(t *testing.T) {
+	sess := &codexWebsocketSession{sessionID: "business-frame"}
+	conn := &websocket.Conn{}
+	payload := []byte(`{"type":"response.output_item.added","item":{"type":"reasoning"}}`)
+	readCh := make(chan codexWebsocketRead, 1)
+	readCh <- codexWebsocketRead{conn: conn, msgType: websocket.TextMessage, payload: payload}
+
+	msgType, gotPayload, err := readCodexWebsocketMessage(
+		context.Background(),
+		sess,
+		conn,
+		readCh,
+		time.Second,
+	)
+	if err != nil {
+		t.Fatalf("read error = %v", err)
+	}
+	if msgType != websocket.TextMessage || !bytes.Equal(gotPayload, payload) {
+		t.Fatalf("read message = (%d, %s), want (%d, %s)", msgType, gotPayload, websocket.TextMessage, payload)
+	}
+}
+
 func TestCodexWebsocketSessionAssignsSequentialTurnIDs(t *testing.T) {
 	sess := &codexWebsocketSession{sessionID: "session-1"}
 	conn := &websocket.Conn{}
