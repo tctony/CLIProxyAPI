@@ -233,6 +233,7 @@ requests:
   # Streaming behavior (SSE keep-alives + safe bootstrap retries).
   # streaming:
   #   keepalive-seconds: 15   # Default: 0 (disabled). <= 0 disables keep-alives.
+  #   stream-idle-timeout-seconds: 45 # Default: 45. Applies to active Codex Responses WebSocket turns.
   #   bootstrap-retries: 1    # Default: 0 (disabled). Retries before first byte is sent.
 
   # Optional payload configuration
