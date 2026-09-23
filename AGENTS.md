@@ -68,3 +68,4 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - The workflow publishes a public `linux/amd64` image to `ghcr.io/tctony/cliproxyapi` with an immutable `sha-<12-character-commit>` tag.
 - Deploy and roll back with an explicit `sha-*` tag. Do not deploy this fork with `latest`.
 - Back up the deployment Compose file before changing its image. Delete that backup after the new deployment is verified; retain and use it only when verification fails and rollback is required.
+- For authenticated deployment checks, use the `CODEX_PROXY_API_KEY` environment variable as a Bearer token; never record or print its value.
