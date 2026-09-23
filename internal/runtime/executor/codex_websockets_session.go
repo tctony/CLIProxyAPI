@@ -543,6 +543,7 @@ func (s *codexWebsocketSession) configureConn(conn *websocket.Conn) {
 	conn.SetPingHandler(func(appData string) error {
 		now := time.Now()
 		fields := s.codexControlFields(conn, now, "ping", len(appData))
+		fields["ping_bytes"] = len(appData)
 		// WriteControl can run concurrently with data writes, so a long write cannot starve the pong.
 		errWrite := conn.WriteControl(websocket.PongMessage, []byte(appData), now.Add(10*time.Second))
 		fields["pong_sent"] = errWrite == nil
