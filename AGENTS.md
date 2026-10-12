@@ -65,7 +65,10 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 ## Fork DevOps
 - Fork repository: `https://github.com/tctony/CLIProxyAPI`
 - Keep `main` aligned with `upstream/main`; use `develop` for personal development.
+- When updating from upstream, fast-forward `main` to `upstream/main` and rebase `develop` onto it to replay fork-specific changes.
+- During the rebase, evaluate whether each fork-specific change is still worth retaining against the updated upstream implementation. Drop changes that upstream has superseded or made unnecessary, and adapt retained changes to the current code rather than replaying them mechanically.
 - Run `go test ./...` locally before committing. The fork image workflow intentionally performs the required compile check but does not run the full test suite.
+- As the final step of an upstream update, after the rebase, full test suite, and required compile check succeed, push `develop` with `git push --force-with-lease origin develop`.
 - Pushing to `develop` does not build an image. Only when the user explicitly requests an image build, manually trigger `.github/workflows/fork-image.yml` by pushing the desired `develop` commit with `git push origin develop:build-image`; do not push to `build-image` otherwise.
 - The workflow publishes a public `linux/amd64` image to `ghcr.io/tctony/cliproxyapi` with an immutable `sha-<12-character-commit>` tag.
 - Deploy and roll back with an explicit `sha-*` tag. Do not deploy this fork with `latest`.
